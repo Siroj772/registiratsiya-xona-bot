@@ -139,7 +139,7 @@ async def room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = cursor.fetchone()
         left = days_left(p[3])
 
-        text = (
+        caption = (
             f"👤 {p[0]}\n"
             f"📅 Kelgan: {p[2]}\n"
             f"📅 Ketadi: {p[3]}\n"
@@ -147,8 +147,15 @@ async def room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 Pul: {p[4]} so‘m"
         )
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Orqaga", callback_data=f"room_{context.user_data.get('room')}")]])
-        await query.edit_message_text(text, reply_markup=kb)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅ Orqaga", callback_data=f"room_{context.user_data.get('room')}")]
+        ])
+
+        # pasport rasmi bilan yuboramiz
+        if p[1]:
+            await query.message.reply_photo(photo=p[1], caption=caption, reply_markup=kb)
+        else:
+            await query.message.reply_text(caption, reply_markup=kb)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
@@ -185,16 +192,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT id, name, date_out, money FROM people WHERE room=?", (room,))
         rows = cursor.fetchall()
 
-        text = f"🏠 Xona {room}\n\n"
+        text = f"🏠 Xona {room}
+
+"
         total = 0
         buttons = []
         for r in rows:
             left = days_left(r[2])
             total += r[3]
-            text += f"👤 {r[1]} — ⏳ {left} kun qoldi\n"
+            text += f"👤 {r[1]} — ⏳ {left} kun qoldi
+"
             buttons.append([InlineKeyboardButton(r[1], callback_data=f"person_{r[0]}")])
 
-        text += f"\n📊 Jami: {total} so‘m"
+        text += f"
+📊 Jami: {total} so‘m"
 
         action_buttons = []
         if len(rows) < ROOM_LIMIT:
@@ -226,3 +237,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     app.run_polling()
+
