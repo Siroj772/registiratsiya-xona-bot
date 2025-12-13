@@ -180,7 +180,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
 
         context.user_data.clear()
-        await update.message.reply_text("✅ Odam qo‘shildi")
+        # odam qo‘shilgach xonaga avtomatik qaytamiz
+        room = context.user_data.get("room")
+        cursor.execute("SELECT id, name, date_out, money FROM people WHERE room=?", (room,))
+        rows = cursor.fetchall()
+
+        text = f"🏠 Xona {room}\n\n"
+        total = 0
+        buttons = []
+        for r in rows:
+            left = days_left(r[2])
+            total += r[3]
+            text += f"👤 {r[1]} — ⏳ {left} kun qoldi\n"
+            buttons.append([InlineKeyboardButton(r[1], callback_data=f"person_{r[0]}")])
+
+        text += f"\n📊 Jami: {total} so‘m"
+
+        action_buttons = []
+        if len(rows) < ROOM_LIMIT:
+            action_buttons.append([InlineKeyboardButton("➕ Odam qo‘shish", callback_data="add")])
+        action_buttons.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back")])
+
+        keyboard = InlineKeyboardMarkup(buttons + action_buttons)
+        context.user_data.clear()
+        await update.message.reply_text(text, reply_markup=keyboard)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "passport":
