@@ -192,7 +192,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT id, name, date_out, money FROM people WHERE room=?", (room,))
         rows = cursor.fetchall()
 
-        text = f"🏠 Xona {room}
+        text = f"🏠 Xona {room}\n\n"
+
 
 "
         total = 0
