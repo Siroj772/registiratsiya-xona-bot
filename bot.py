@@ -20,8 +20,7 @@ ROOM_LIMIT = 4
 # ================= DATABASE =================
 conn = sqlite3.connect("data.db", check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute(
-    """
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS people (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room INTEGER,
@@ -31,8 +30,7 @@ CREATE TABLE IF NOT EXISTS people (
     date_out TEXT,
     money INTEGER
 )
-"""
-)
+""")
 conn.commit()
 
 # ================= HELPERS =================
@@ -50,26 +48,16 @@ def room_buttons():
         ])
     return InlineKeyboardMarkup(buttons)
 
-# ================= SCHEDULER =================
-async def check_expiring(app):
-    cursor.execute("SELECT room, name, date_out FROM people")
-    for room, name, date_out in cursor.fetchall():
-        if days_left(date_out) == 3:
-            await app.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"⚠️ 3 kun qoldi!\n👤 {name}\n🏠 Xona {room}",
-            )
-
 # ================= UI =================
-async def show_rooms(update):
+async def show_rooms(message):
     cursor.execute("SELECT SUM(money) FROM people")
     total = cursor.fetchone()[0] or 0
-    await update.effective_message.reply_text(
+    await message.reply_text(
         f"🏠 Xonani tanlang:\n\n📊 Umumiy balans: {total} so‘m",
         reply_markup=room_buttons(),
     )
 
-async def show_room(update, room):
+async def show_room(message, room):
     cursor.execute("SELECT id, name, date_out, money FROM people WHERE room=?", (room,))
     rows = cursor.fetchall()
 
@@ -91,31 +79,40 @@ async def show_room(update, room):
         actions.append([InlineKeyboardButton("➕ Odam qo‘shish", callback_data="add")])
     actions.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back")])
 
-    await update.effective_message.reply_text(
+    await message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup(buttons + actions),
     )
 
+# ================= SCHEDULER =================
+async def check_expiring(app):
+    cursor.execute("SELECT room, name, date_out FROM people")
+    for room, name, date_out in cursor.fetchall():
+        if days_left(date_out) == 3:
+            await app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⚠️ 3 kun qoldi!\n👤 {name}\n🏠 Xona {room}",
+            )
+
 # ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Ruxsat yo‘q")
+        await update.message.reply_text("⛔ Bu bot faqat admin uchun")
         return
-    await show_rooms(update)
+    await show_rooms(update.message)
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     data = query.data
 
     if data == "back":
-        await show_rooms(query)
+        await show_rooms(query.message)
 
     elif data.startswith("room_"):
         room = int(data.split("_")[1])
         context.user_data["room"] = room
-        await show_room(query, room)
+        await show_room(query.message, room)
 
     elif data == "add":
         context.user_data["step"] = "name"
@@ -158,7 +155,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM people WHERE id=?", (pid,))
         conn.commit()
         context.user_data.clear()
-        await show_room(query, room)
+        await show_room(query.message, room)
 
     elif data == "edit_money":
         context.user_data["step"] = "edit_money"
@@ -181,7 +178,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💵 Pul miqdori:")
 
     elif step == "money":
-        room = context.user_data.get("room")
+        room = context.user_data["room"]
         cursor.execute(
             "INSERT INTO people (room, name, passport_photo, date_in, date_out, money) VALUES (?,?,?,?,?,?)",
             (
@@ -195,18 +192,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
         context.user_data.clear()
-        await show_room(update, room)
+        await show_room(update.message, room)
 
     elif step == "edit_money":
-        pid = context.user_data.get("edit_id")
-        room = context.user_data.get("room")
+        pid = context.user_data["edit_id"]
+        room = context.user_data["room"]
         cursor.execute(
             "UPDATE people SET money=? WHERE id=?",
             (int(update.message.text), pid),
         )
         conn.commit()
         context.user_data.clear()
-        await show_room(update, room)
+        await show_room(update.message, room)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "passport":
