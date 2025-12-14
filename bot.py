@@ -94,8 +94,8 @@ async def show_room(msg, room):
     rows = cursor.fetchall()
 
     text = f"🏠 Xona {room}\n\n"
-    kb = []
     total = 0
+    kb = []
 
     for pid, name, date_out, money in rows:
         total += money
@@ -117,7 +117,7 @@ async def show_room(msg, room):
     kb.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back_rooms")])
     await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-# ================= SCHEDULER JOBS =================
+# ================= SCHEDULER =================
 async def send_total_balance(app):
     cursor.execute("SELECT SUM(amount) FROM payments")
     total = cursor.fetchone()[0] or 0
@@ -128,19 +128,19 @@ async def send_total_balance(app):
 
 async def check_expiring(app):
     cursor.execute("""
-        SELECT name, telegram_id, date_out FROM people
+        SELECT telegram_id, date_out FROM people
         WHERE telegram_id IS NOT NULL AND date_out IS NOT NULL
     """)
-    for name, tid, date_out in cursor.fetchall():
-        days, _ = remaining(date_out)
-        if days == 3:
+    for tid, date_out in cursor.fetchall():
+        d, _ = remaining(date_out)
+        if d == 3:
             try:
                 await app.bot.send_message(
                     chat_id=tid,
                     text=(
                         "⚠️ Ogohlantirish!\n\n"
-                        "⏳ Yashash muddati tugashiga 3 kun qoldi.\n\n"
-                        f"📅 Amal qilish muddati:\n{date_out}"
+                        "⏳ Yashash muddati tugashiga 3 kun qoldi.\n"
+                        f"📅 {date_out}"
                     )
                 )
             except:
@@ -184,7 +184,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("💳 Karta raqamini yozing:")
 
     elif q.data == "pay":
-        card = get_setting("card") or "❌ Karta kiritilmagan"
+        card = get_setting("card") or "❌ Karta yo‘q"
         await q.message.reply_text(
             f"💳 To‘lov uchun karta:\n\n{card}",
             reply_markup=InlineKeyboardMarkup([
@@ -212,6 +212,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Karta saqlandi")
         await show_rooms(update.message)
 
+    elif step == "name":
+        context.user_data["name"] = update.message.text
+        context.user_data["step"] = "telegram"
+        await update.message.reply_text("👤 Telegram username (@ali) yoki ID:")
+
+    elif step == "telegram":
+        t = update.message.text.strip()
+        if t.startswith("@"):
+            context.user_data["telegram_username"] = t
+            context.user_data["telegram_id"] = None
+        else:
+            context.user_data["telegram_id"] = int(t)
+            context.user_data["telegram_username"] = None
+        context.user_data["step"] = "passport"
+        await update.message.reply_text("🪪 Pasport rasmini yuboring:")
+
     elif step == "confirm":
         amount = int(update.message.text)
         uid = context.user_data["confirm_uid"]
@@ -234,13 +250,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (uid, room, amount, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
 
-        # odamga xabar
         await context.bot.send_message(
             chat_id=uid,
             text=(
                 "✅ To‘lovingiz qabul qilindi\n\n"
-                f"💰 Summa: {amount:,} so‘m\n"
-                f"📅 Amal qilish muddati:\n{new_date_str} gacha"
+                f"💰 {amount:,} so‘m\n"
+                f"📅 {new_date_str} gacha"
             )
         )
 
@@ -250,7 +265,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= PHOTO =================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("step") == "check":
+    step = context.user_data.get("step")
+
+    if step == "passport":
+        cursor.execute("""
+            INSERT INTO people
+            (room, name, telegram_id, telegram_username, passport_photo)
+            VALUES (?,?,?,?,?)
+        """, (
+            context.user_data["room"],
+            context.user_data["name"],
+            context.user_data.get("telegram_id"),
+            context.user_data.get("telegram_username"),
+            update.message.photo[-1].file_id
+        ))
+        conn.commit()
+
+        room = context.user_data["room"]
+        context.user_data.clear()
+        await show_room(update.message, room)
+
+    elif step == "check":
         uid = update.effective_user.id
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
