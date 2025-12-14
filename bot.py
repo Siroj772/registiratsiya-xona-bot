@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS settings (
 """)
 conn.commit()
 
-# ================= SETTINGS HELPERS =================
+# ================= SETTINGS =================
 def set_setting(key, value):
     cursor.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
@@ -51,7 +51,7 @@ def get_setting(key):
     r = cursor.fetchone()
     return r[0] if r else None
 
-# ================= TIME HELPERS =================
+# ================= TIME =================
 def calc_new_date(old_date, amount):
     seconds = (amount / PRICE_PER_DAY) * 86400
     base = datetime.now()
@@ -92,7 +92,7 @@ async def show_room(msg, room):
             d, _ = remaining(date_out)
             if d <= 3:
                 icon = "🔴"
-            text += f"👤 {name} {icon}\n"
+        text += f"👤 {name} {icon}\n"
         kb.append([InlineKeyboardButton(name, callback_data=f"person_{pid}")])
 
     if len(rows) < ROOM_LIMIT:
@@ -150,6 +150,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data.startswith("room_"):
         room = int(q.data.split("_")[1])
+        context.user_data.clear()
         context.user_data["room"] = room
         await show_room(q.message, room)
 
@@ -174,7 +175,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"⏳ {dd} kun {hh} soat\n"
 
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅ Orqaga", callback_data=f"room_{context.user_data['room']}")]
+            [InlineKeyboardButton("⬅ Orqaga", callback_data=f"room_{context.user_data.get('room')}")]
         ])
 
         if photo:
@@ -192,16 +193,20 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif q.data == "paid":
+        context.user_data.clear()
         context.user_data["step"] = "check"
         await q.message.reply_text("📸 Chekni yuboring")
 
     elif q.data == "add_card":
+        context.user_data.clear()
         context.user_data["step"] = "add_card"
         await q.message.reply_text("💳 Karta raqamini yozing:")
 
     elif q.data.startswith("confirm_"):
         uid = int(q.data.split("_")[1])
-        context.user_data["confirm"] = uid
+        context.user_data.clear()
+        context.user_data["step"] = "confirm"
+        context.user_data["confirm_uid"] = uid
         await q.message.reply_text("💰 To‘langan summani yozing:")
 
 # ================= TEXT =================
@@ -211,7 +216,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "name":
         context.user_data["name"] = update.message.text
         context.user_data["step"] = "telegram"
-        await update.message.reply_text("👤 Telegram username (@ali) yoki ID:")
+        await update.message.reply_text("👤 Telegram username (@ali) yoki ID yozing:")
 
     elif step == "telegram":
         t = update.message.text.strip()
@@ -232,7 +237,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif step == "confirm":
         amount = int(update.message.text)
-        uid = context.user_data["confirm"]
+        uid = context.user_data["confirm_uid"]
 
         cursor.execute("SELECT date_out FROM people WHERE telegram_id=?", (uid,))
         old = cursor.fetchone()[0]
@@ -251,26 +256,36 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= PHOTO =================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("step") == "passport":
+    step = context.user_data.get("step")
+
+    # PASPORT
+    if step == "passport":
+        room = context.user_data.get("room")
+        if room is None:
+            await update.message.reply_text("❌ Xona topilmadi")
+            context.user_data.clear()
+            return
+
         cursor.execute("""
             INSERT INTO people
             (room, name, telegram_id, telegram_username, passport_photo)
             VALUES (?,?,?,?,?)
         """, (
-            context.user_data["room"],
+            room,
             context.user_data["name"],
             context.user_data.get("telegram_id"),
             context.user_data.get("telegram_username"),
             update.message.photo[-1].file_id
         ))
         conn.commit()
-        room = context.user_data["room"]
+
         context.user_data.clear()
         await show_room(update.message, room)
 
-    elif context.user_data.get("step") == "check":
-        photo = update.message.photo[-1].file_id
+    # CHEK
+    elif step == "check":
         uid = update.effective_user.id
+        photo = update.message.photo[-1].file_id
 
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
@@ -280,6 +295,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{uid}")]
             ])
         )
+
         context.user_data.clear()
         await update.message.reply_text("⏳ Chek adminga yuborildi")
 
@@ -297,5 +313,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
     app.run_polling()
+
 
 
