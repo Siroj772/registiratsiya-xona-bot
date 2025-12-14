@@ -77,13 +77,14 @@ def remaining(date_out):
 
 # ================= ROOMS =================
 def room_buttons():
-    rows = []
+    kb = []
     for i in range(1, 25, 2):
-        rows.append([
+        kb.append([
             InlineKeyboardButton(f"Xona {i}", callback_data=f"room_{i}"),
             InlineKeyboardButton(f"Xona {i+1}", callback_data=f"room_{i+1}")
         ])
-    return InlineKeyboardMarkup(rows)
+    kb.append([InlineKeyboardButton("💳 Karta qo‘shish", callback_data="add_card")])
+    return InlineKeyboardMarkup(kb)
 
 async def show_rooms(msg):
     await msg.reply_text("🏠 Xonani tanlang:", reply_markup=room_buttons())
@@ -107,7 +108,7 @@ async def show_room(msg, room):
     if len(rows) < ROOM_LIMIT:
         kb.append([InlineKeyboardButton("➕ Odam qo‘shish", callback_data="add")])
 
-    kb.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back")])
+    kb.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back_rooms")])
     await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
 # ================= AUTO BIND =================
@@ -121,33 +122,12 @@ async def auto_bind(update: Update):
     """, (u.id, f"@{u.username}"))
     conn.commit()
 
-# ================= SCHEDULER =================
-async def check_expiring(app):
-    cursor.execute("SELECT name, room, date_out, telegram_id FROM people")
-    for n, r, d, tg in cursor.fetchall():
-        if not d or not tg:
-            continue
-        days, _ = remaining(d)
-        if days == 3:
-            await app.bot.send_message(
-                chat_id=tg,
-                text=f"⚠️ Ogohlantirish!\n👤 {n}\n🏠 Xona {r}\n⏳ 3 kun qoldi"
-            )
-
-async def send_total_balance(app):
-    cursor.execute("SELECT SUM(amount) FROM payments")
-    total = cursor.fetchone()[0] or 0
-    await app.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"📊 10 KUNLIK HISOBOT\n\n💰 Umumiy tushum: {total:,} so‘m"
-    )
-
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await auto_bind(update)
+    context.user_data.clear()
 
     if update.effective_user.id == ADMIN_ID:
-        context.user_data.clear()
         await show_rooms(update.message)
     else:
         await update.message.reply_text(
@@ -163,7 +143,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    if q.data == "back":
+    if q.data == "back_rooms":
         context.user_data.clear()
         await show_rooms(q.message)
 
@@ -176,6 +156,13 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "add":
         context.user_data["step"] = "name"
         await q.message.reply_text("👤 Ismini yozing:")
+
+    elif q.data == "add_card":
+        context.user_data["step"] = "add_card"
+        await q.message.reply_text(
+            "💳 Karta raqamini yozing:\n\n"
+            "8600 1234 5678 9012\nIsm Familiya"
+        )
 
     elif q.data.startswith("person_"):
         pid = int(q.data.split("_")[1])
@@ -207,7 +194,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == "delete_person":
         await q.message.reply_text(
-            "❗ Rostan ham o‘chirmoqchimisiz?",
+            "❗ Rostdan o‘chirmoqchimisiz?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Ha", callback_data="confirm_delete")],
                 [InlineKeyboardButton("❌ Yo‘q", callback_data=f"room_{context.user_data['room']}")]
@@ -224,7 +211,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("✏️ Yangi ismni yozing:")
 
     elif q.data == "pay":
-        card = get_setting("card") or "❌ Karta kiritilmagan"
+        card = get_setting("card") or "❌ Karta yo‘q"
         await q.message.reply_text(
             f"💳 To‘lov uchun karta:\n\n{card}",
             reply_markup=InlineKeyboardMarkup([
@@ -233,7 +220,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif q.data == "paid":
-        context.user_data.clear()
         context.user_data["step"] = "check"
         await q.message.reply_text("📸 Chekni yuboring")
 
@@ -252,10 +238,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (uid,))
         rows = cursor.fetchall()
 
-        if not rows:
-            await q.message.reply_text("🧾 Sizda to‘lovlar yo‘q")
-            return
-
         text = "🧾 MENING TO‘LOVLARIM\n\n"
         for a, t in rows:
             text += f"💰 {a} so‘m — 🕒 {t}\n"
@@ -266,10 +248,16 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
 
-    if step == "name":
+    if step == "add_card":
+        set_setting("card", update.message.text)
+        context.user_data.clear()
+        await update.message.reply_text("✅ Karta saqlandi")
+        await show_rooms(update.message)
+
+    elif step == "name":
         context.user_data["name"] = update.message.text
         context.user_data["step"] = "telegram"
-        await update.message.reply_text("👤 Telegram username (@ali) yoki ID yozing:")
+        await update.message.reply_text("👤 Telegram username yoki ID:")
 
     elif step == "telegram":
         t = update.message.text.strip()
@@ -279,19 +267,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data["telegram_id"] = int(t)
             context.user_data["telegram_username"] = None
-
         context.user_data["step"] = "passport"
         await update.message.reply_text("🪪 Pasport rasmini yuboring:")
 
     elif step == "edit_name":
         context.user_data["new_name"] = update.message.text
         context.user_data["step"] = "edit_telegram"
-        await update.message.reply_text("✏️ Yangi username yoki ID:")
+        await update.message.reply_text("✏️ Username yoki ID:")
 
     elif step == "edit_telegram":
         pid = context.user_data["edit_pid"]
         t = update.message.text.strip()
-
         if t.startswith("@"):
             cursor.execute("""
                 UPDATE people SET name=?, telegram_username=?, telegram_id=NULL
@@ -303,9 +289,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 WHERE id=?
             """, (context.user_data["new_name"], int(t), pid))
         conn.commit()
-
-        await show_room(update.message, context.user_data["room"])
         context.user_data.clear()
+        await show_room(update.message, context.user_data.get("room", 1))
 
     elif step == "confirm":
         amount = int(update.message.text)
@@ -328,9 +313,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (uid, room, amount, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
 
-        d, h = remaining(new_date.strftime("%Y-%m-%d %H:%M"))
         context.user_data.clear()
-        await update.message.reply_text(f"✅ Tasdiqlandi\n➕ {d} kun {h} soat")
+        await update.message.reply_text("✅ To‘lov tasdiqlandi")
+        await show_rooms(update.message)
 
 # ================= PHOTO =================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,28 +341,20 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif step == "check":
         uid = update.effective_user.id
-        photo = update.message.photo[-1].file_id
-
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
-            photo=photo,
-            caption=f"💳 TO‘LOV CHEKI\nTelegram ID: {uid}",
+            photo=update.message.photo[-1].file_id,
+            caption=f"💳 CHEK\nTelegram ID: {uid}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{uid}")]
             ])
         )
-
         context.user_data.clear()
-        await update.message.reply_text("⏳ Chek adminga yuborildi")
+        await update.message.reply_text("⏳ Adminga yuborildi")
 
 # ================= MAIN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_expiring, "interval", hours=24, args=[app])
-    scheduler.add_job(send_total_balance, "interval", days=10, args=[app])
-    scheduler.start()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
