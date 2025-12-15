@@ -232,6 +232,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
 
     if step == "confirm_amount":
+            elif step == "name":
+        # ismni saqlaymiz
+        context.user_data["name"] = update.message.text
+        context.user_data["step"] = "tid"
+        await update.message.reply_text("🆔 Telegram ID yozing:")
+
+    elif step == "tid":
+        context.user_data["telegram_id"] = int(update.message.text)
+        context.user_data["step"] = "phone"
+        await update.message.reply_text("📞 Telefon raqam yozing:")
+
+    elif step == "phone":
+        context.user_data["phone"] = update.message.text
+        context.user_data["step"] = "passport"
+        await update.message.reply_text("🪪 Pasport rasmini yuboring:")
+
         amount = int(update.message.text)
         uid = context.user_data["pay_uid"]
 
