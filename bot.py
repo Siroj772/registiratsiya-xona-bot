@@ -215,78 +215,56 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💳 To‘lov uchun karta:\n{card}\n\n📸 Chek yuboring"
         )
 
+# ================= CONFIRM (ADMIN) =================
+async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    uid = int(q.data.split("_")[1])
+    context.user_data.clear()
+    context.user_data["pay_uid"] = uid
+    context.user_data["step"] = "confirm_amount"
+
+    await q.message.edit_text("💰 Summani yozing:")
+
 # ================= TEXT =================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
 
-    if step == "add_admin":
-        cursor.execute("INSERT OR IGNORE INTO admins VALUES(?)", (int(update.message.text),))
-        conn.commit()
-        context.user_data.clear()
-        await update.message.reply_text("✅ Admin qo‘shildi")
-
-    elif step == "add_card":
-        set_setting("card", update.message.text)
-        context.user_data.clear()
-        await update.message.reply_text("✅ Karta saqlandi")
-
-    elif step == "name":
-        context.user_data["name"] = update.message.text
-        context.user_data["step"] = "tid"
-        await update.message.reply_text("🆔 Telegram ID:")
-
-    elif step == "tid":
-        context.user_data["telegram_id"] = int(update.message.text)
-        context.user_data["step"] = "phone"
-        await update.message.reply_text("📞 Telefon raqam:")
-
-    elif step == "phone":
-        context.user_data["phone"] = update.message.text
-        context.user_data["step"] = "passport"
-        await update.message.reply_text("🪪 Pasport rasmini yuboring:")
-
-    elif step == "admin_money":
+    if step == "confirm_amount":
         amount = int(update.message.text)
-        pid = context.user_data["pid"]
-        cursor.execute("SELECT telegram_id,date_out FROM people WHERE id=?", (pid,))
-        tid, old = cursor.fetchone()
+        uid = context.user_data["pay_uid"]
+
+        cursor.execute("SELECT room, date_out FROM people WHERE telegram_id=?", (uid,))
+        room, old = cursor.fetchone()
+
         new = calc_new_date(old, amount)
-        cursor.execute(
-            "UPDATE people SET date_out=?, money=money+? WHERE id=?",
-            (new.strftime("%Y-%m-%d %H:%M"), amount, pid)
-        )
-        cursor.execute(
-            "INSERT INTO payments VALUES(NULL,?,?,?)",
-            (tid, amount, datetime.now().strftime("%Y-%m-%d %H:%M"))
-        )
+
+        cursor.execute("""
+        UPDATE people SET date_out=?, money=money+?
+        WHERE telegram_id=?
+        """, (new.strftime("%Y-%m-%d %H:%M"), amount, uid))
+
+        cursor.execute("""
+        INSERT INTO payments VALUES(NULL,?,?,?)
+        """, (uid, amount, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
+
         await context.bot.send_message(
-            tid,
-            f"✅ To‘lov qabul qilindi\n💰 {amount:,} so‘m\n📅 {new}"
+            uid,
+            f"✅ To‘lov qabul qilindi\n"
+            f"💰 Qo‘shildi: {amount:,} so‘m\n"
+            f"📅 Tugaydi: {new.strftime('%Y-%m-%d %H:%M')}"
         )
+
         context.user_data.clear()
-        await update.message.reply_text("✅ Hisoblandi")
+        text, kb = room_view(room)
+        await update.message.reply_text("✅ To‘lov tasdiqlandi")
+        await update.message.reply_text(text, reply_markup=kb)
 
 # ================= PHOTO =================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("step")
-
-    if step == "passport":
-        cursor.execute("""
-        INSERT INTO people(room,name,telegram_id,phone,passport_photo)
-        VALUES(?,?,?,?,?)
-        """, (
-            context.user_data["room"],
-            context.user_data["name"],
-            context.user_data["telegram_id"],
-            context.user_data["phone"],
-            update.message.photo[-1].file_id
-        ))
-        conn.commit()
-        context.user_data.clear()
-        await update.message.reply_text("✅ Odam qo‘shildi")
-
-    elif step == "check":
+    if context.user_data.get("step") == "check":
         admin = cursor.execute("SELECT telegram_id FROM admins LIMIT 1").fetchone()[0]
         await context.bot.send_photo(
             admin,
@@ -300,41 +278,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text("⏳ Chek yuborildi")
 
-# ================= CONFIRM =================
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["pay_uid"] = int(q.data.split("_")[1])
-    context.user_data["step"] = "confirm_amount"
-    await q.message.edit_text("💰 Summani yozing:")
-
-# ================= SCHEDULER =================
-def setup_sms_scheduler(app):
-    scheduler = AsyncIOScheduler()
-
-    async def check_sms():
-        cursor.execute("SELECT telegram_id,phone,date_out FROM people WHERE date_out IS NOT NULL")
-        for tid, phone, d in cursor.fetchall():
-            days_left = (datetime.strptime(d, "%Y-%m-%d %H:%M") - datetime.now()).days
-            if days_left in (1, 2):
-                cursor.execute("SELECT 1 FROM sms_log WHERE telegram_id=? AND days_left=?",
-                               (tid, days_left))
-                if cursor.fetchone():
-                    continue
-                send_sms(phone, f"⚠️ Yashash muddati tugashiga {days_left} kun qoldi")
-                cursor.execute(
-                    "INSERT INTO sms_log VALUES(?,?,?)",
-                    (tid, days_left, datetime.now().isoformat())
-                )
-                conn.commit()
-
-    scheduler.add_job(check_sms, "interval", hours=24)
-    scheduler.start()
-
 # ================= MAIN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    setup_sms_scheduler(app)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(confirm, pattern="^confirm_"))
