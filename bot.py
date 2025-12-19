@@ -160,7 +160,7 @@ async def auto_check(app):
         await asyncio.sleep(3600)
 
 # ---------- MAIN ----------
-async def main():
+def main():
     app = ApplicationBuilder().token(config.TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -169,10 +169,18 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    asyncio.create_task(auto_check(app))
-    await app.run_polling()
+    # background task
+    app.job_queue.run_repeating(
+        auto_check_job,
+        interval=3600,
+        first=10
+    )
+
+    print("HOSTEL BOT ISHLAYAPTI 🚀")
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 
 
