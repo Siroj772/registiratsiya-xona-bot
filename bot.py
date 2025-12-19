@@ -1,308 +1,178 @@
-import os, sqlite3, requests
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime
+import asyncio
+import config, db
 
-# ================= CONFIG =================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ESKIZ_TOKEN = os.environ.get("ESKIZ_TOKEN")
-PRICE_PER_DAY = 26666
-ROOM_LIMIT = 4
+# ---------- HELP ----------
+def days_left(end):
+    d = datetime.strptime(end, "%Y-%m-%d")
+    return (d - datetime.now()).days
 
-# ================= DATABASE =================
-conn = sqlite3.connect("data.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS people(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- room INTEGER,
- name TEXT,
- telegram_id INTEGER UNIQUE,
- phone TEXT,
- passport_photo TEXT,
- date_out TEXT,
- money INTEGER DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS payments(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- telegram_id INTEGER,
- amount INTEGER,
- created_at TEXT
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS admins(
- telegram_id INTEGER PRIMARY KEY
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS settings(
- key TEXT PRIMARY KEY,
- value TEXT
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS sms_log(
- telegram_id INTEGER,
- days_left INTEGER,
- sent_at TEXT,
- UNIQUE(telegram_id, days_left)
-)
-""")
-conn.commit()
-
-# ================= HELPERS =================
-def is_admin(uid):
-    cursor.execute("SELECT 1 FROM admins WHERE telegram_id=?", (uid,))
-    return cursor.fetchone() is not None
-
-def ensure_admin(uid):
-    cursor.execute("SELECT COUNT(*) FROM admins")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO admins VALUES(?)", (uid,))
-        conn.commit()
-
-def set_setting(k, v):
-    cursor.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (k, v))
-    conn.commit()
-
-def get_setting(k):
-    cursor.execute("SELECT value FROM settings WHERE key=?", (k,))
-    r = cursor.fetchone()
-    return r[0] if r else None
-
-def calc_new_date(old, amount):
-    base = datetime.now()
-    if old:
-        d = datetime.strptime(old, "%Y-%m-%d %H:%M")
-        if d > base:
-            base = d
-    return base + timedelta(days=amount / PRICE_PER_DAY)
-
-def remaining(d):
-    diff = datetime.strptime(d, "%Y-%m-%d %H:%M") - datetime.now()
-    return diff.days, diff.seconds // 3600
-
-# ================= SMS =================
-def send_sms(phone, text):
-    if not ESKIZ_TOKEN:
-        return
-    requests.post(
-        "https://notify.eskiz.uz/api/message/sms/send",
-        headers={"Authorization": f"Bearer {ESKIZ_TOKEN}"},
-        data={"mobile_phone": phone, "message": text, "from": "4546"}
-    )
-
-# ================= UI =================
-def rooms_kb():
-    kb = []
-    for i in range(1, 25, 2):
-        kb.append([
-            InlineKeyboardButton(f"Xona {i}", callback_data=f"room_{i}"),
-            InlineKeyboardButton(f"Xona {i+1}", callback_data=f"room_{i+1}")
-        ])
-    kb.append([
-        InlineKeyboardButton("➕ Admin qo‘shish", callback_data="add_admin"),
-        InlineKeyboardButton("💳 Karta qo‘shish", callback_data="add_card")
-    ])
-    return InlineKeyboardMarkup(kb)
-
-def room_view(room):
-    cursor.execute("SELECT id,name,date_out FROM people WHERE room=?", (room,))
-    rows = cursor.fetchall()
-    text = f"🏠 Xona {room}\n\n"
-    kb = []
-    for pid, n, d in rows:
-        icon = ""
-        if d:
-            days, _ = remaining(d)
-            if days <= 2:
-                icon = "🔴"
-        text += f"👤 {n} {icon}\n"
-        kb.append([InlineKeyboardButton(n, callback_data=f"person_{pid}")])
-    if len(rows) < ROOM_LIMIT:
-        kb.append([InlineKeyboardButton("➕ Odam qo‘shish", callback_data="add_person")])
-    kb.append([InlineKeyboardButton("⬅ Orqaga", callback_data="back_rooms")])
-    return text, InlineKeyboardMarkup(kb)
-
-# ================= START =================
+# ---------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    ensure_admin(uid)
-    context.user_data.clear()
 
-    if is_admin(uid):
-        await update.message.reply_text("🏠 Xonalar:", reply_markup=rooms_kb())
-    else:
+    if uid in config.ADMINS:
+        kb = [[InlineKeyboardButton(f"🏠 Xona {i}", callback_data=f"room_{i}")]
+              for i in range(1, config.ROOM_COUNT + 1)]
         await update.message.reply_text(
-            "💳 To‘lov",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Pul qo‘shish", callback_data="pay")]
-            ])
+            "🏨 ADMIN PANEL",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    else:
+        p = db.get_person_by_tg(uid)
+        if not p:
+            await update.message.reply_text("❌ Siz tizimda yo‘qsiz")
+            return
+        pid, room, name, end, bal = p
+        await update.message.reply_text(
+            f"👤 {name}\n🏠 Xona {room}\n💰 Balans: {bal}\n⏳ {days_left(end)} kun",
+            reply_markup=ReplyKeyboardMarkup([["💳 Pul kiritish"]], resize_keyboard=True)
         )
 
-# ================= CALLBACKS =================
+# ---------- ROOM MENU ----------
+async def room_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    room = int(q.data.split("_")[1])
+    context.user_data["room"] = room
+
+    kb = [
+        [InlineKeyboardButton("➕ Odam qo‘shish", callback_data="add")],
+        [InlineKeyboardButton("💳 Karta qo‘shish", callback_data="card")],
+        [InlineKeyboardButton("💰 Kunlik narx", callback_data="price")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="back")]
+    ]
+    await q.edit_message_text(f"🏠 Xona {room}", reply_markup=InlineKeyboardMarkup(kb))
+
+# ---------- CALLBACK ----------
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    uid = q.from_user.id
+    data = q.data
 
-    if q.data == "back_rooms":
-        context.user_data.clear()
-        await q.message.edit_text("🏠 Xonalar:", reply_markup=rooms_kb())
-
-    elif q.data.startswith("room_"):
-        room = int(q.data.split("_")[1])
-        context.user_data["room"] = room
-        text, kb = room_view(room)
-        await q.message.edit_text(text, reply_markup=kb)
-
-    elif q.data == "add_admin":
-        context.user_data["step"] = "add_admin"
-        await q.message.edit_text("🆔 Admin ID yozing:")
-
-    elif q.data == "add_card":
-        context.user_data["step"] = "add_card"
-        await q.message.edit_text("💳 Karta raqamini yozing:")
-
-    elif q.data == "add_person":
+    if data == "add":
+        if db.people_count(context.user_data["room"]) >= config.MAX_PEOPLE_IN_ROOM:
+            await q.message.reply_text("❌ Xona to‘la (4)")
+            return
         context.user_data["step"] = "name"
-        await q.message.edit_text("👤 Ism yozing:")
+        await q.message.reply_text("👤 Ism:")
 
-    elif q.data.startswith("person_"):
-        pid = int(q.data.split("_")[1])
-        context.user_data["pid"] = pid
-        cursor.execute("""
-        SELECT name,telegram_id,passport_photo,date_out,money
-        FROM people WHERE id=?""", (pid,))
-        n, tid, p, d, m = cursor.fetchone()
-        text = f"👤 {n}\n🆔 {tid}\n💰 {m:,} so‘m\n📅 {d or '-'}"
-        kb = [
-            [InlineKeyboardButton("💰 Pul qo‘shish", callback_data="admin_money")],
-            [InlineKeyboardButton("🗑 O‘chirish", callback_data="delete_person")],
-            [InlineKeyboardButton("⬅ Orqaga", callback_data=f"room_{context.user_data['room']}")]
-        ]
-        if p:
-            await q.message.reply_photo(p, caption=text, reply_markup=InlineKeyboardMarkup(kb))
-        else:
-            await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    elif data == "card":
+        context.user_data["step"] = "card"
+        await q.message.reply_text("💳 Karta raqami:")
 
-    elif q.data == "delete_person":
-        cursor.execute("DELETE FROM people WHERE id=?", (context.user_data["pid"],))
-        conn.commit()
-        text, kb = room_view(context.user_data["room"])
-        await q.message.edit_text(text, reply_markup=kb)
+    elif data == "price":
+        context.user_data["step"] = "price"
+        await q.message.reply_text("💰 Kunlik narx:")
 
-    elif q.data == "admin_money":
-        context.user_data["step"] = "admin_money"
-        await q.message.edit_text("💰 Summani yozing:")
+    elif data.startswith("confirm_"):
+        context.user_data["pay"] = int(data.split("_")[1])
+        await q.message.reply_text("💰 Qancha pul?")
 
-    elif q.data == "pay":
-        card = get_setting("card") or "❌ Karta yo‘q"
-        context.user_data["step"] = "check"
-        await q.message.edit_text(
-            f"💳 To‘lov uchun karta:\n{card}\n\n📸 Chek yuboring"
-        )
-
-# ================= CONFIRM (ADMIN) =================
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    uid = int(q.data.split("_")[1])
-    context.user_data.clear()
-    context.user_data["pay_uid"] = uid
-    context.user_data["step"] = "confirm_amount"
-
-    await q.message.edit_text("💰 Summani yozing:")
-
-# ================= TEXT =================
+# ---------- TEXT ----------
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
 
-    if step == "confirm_amount":
-            elif step == "name":
-        # ismni saqlaymiz
+    if step == "name":
         context.user_data["name"] = update.message.text
-        context.user_data["step"] = "tid"
-        await update.message.reply_text("🆔 Telegram ID yozing:")
-
-    elif step == "tid":
-        context.user_data["telegram_id"] = int(update.message.text)
-        context.user_data["step"] = "phone"
-        await update.message.reply_text("📞 Telefon raqam yozing:")
-
-    elif step == "phone":
-        context.user_data["phone"] = update.message.text
         context.user_data["step"] = "passport"
-        await update.message.reply_text("🪪 Pasport rasmini yuboring:")
+        await update.message.reply_text("🛂 Passport:")
+        return
 
-        amount = int(update.message.text)
-        uid = context.user_data["pay_uid"]
+    if step == "passport":
+        context.user_data["passport"] = update.message.text
+        context.user_data["step"] = "phone"
+        await update.message.reply_text("📞 Telefon:")
+        return
 
-        cursor.execute("SELECT room, date_out FROM people WHERE telegram_id=?", (uid,))
-        room, old = cursor.fetchone()
+    if step == "phone":
+        context.user_data["phone"] = update.message.text
+        context.user_data["step"] = "end"
+        await update.message.reply_text("📅 Ketish sanasi (YYYY-MM-DD):")
+        return
 
-        new = calc_new_date(old, amount)
-
-        cursor.execute("""
-        UPDATE people SET date_out=?, money=money+?
-        WHERE telegram_id=?
-        """, (new.strftime("%Y-%m-%d %H:%M"), amount, uid))
-
-        cursor.execute("""
-        INSERT INTO payments VALUES(NULL,?,?,?)
-        """, (uid, amount, datetime.now().strftime("%Y-%m-%d %H:%M")))
-        conn.commit()
-
-        await context.bot.send_message(
-            uid,
-            f"✅ To‘lov qabul qilindi\n"
-            f"💰 Qo‘shildi: {amount:,} so‘m\n"
-            f"📅 Tugaydi: {new.strftime('%Y-%m-%d %H:%M')}"
-        )
-
+    if step == "end":
+        db.add_person((
+            context.user_data["room"],
+            context.user_data["name"],
+            context.user_data["passport"],
+            context.user_data["phone"],
+            update.effective_user.username,
+            update.effective_user.id,
+            update.message.text,
+            0
+        ))
         context.user_data.clear()
-        text, kb = room_view(room)
+        await update.message.reply_text("✅ Odam qo‘shildi")
+        return
+
+    if step == "card":
+        db.set_room_card(context.user_data["room"], update.message.text)
+        context.user_data.clear()
+        await update.message.reply_text("✅ Karta saqlandi")
+        return
+
+    if step == "price":
+        db.set_room_price(context.user_data["room"], int(update.message.text))
+        context.user_data.clear()
+        await update.message.reply_text("✅ Narx saqlandi")
+        return
+
+    if update.message.text == "💳 Pul kiritish":
+        p = db.get_person_by_tg(update.effective_user.id)
+        pid = p[0]
+        context.user_data["pid"] = pid
+        card = db.get_room_card(p[1])
+        await update.message.reply_text(f"💳 Karta:\n{card}\n📸 Chek tashlang")
+
+    if "pay" in context.user_data:
+        db.confirm_payment(context.user_data["pay"], int(update.message.text))
+        context.user_data.clear()
         await update.message.reply_text("✅ To‘lov tasdiqlandi")
-        await update.message.reply_text(text, reply_markup=kb)
 
-# ================= PHOTO =================
+# ---------- PHOTO ----------
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("step") == "check":
-        admin = cursor.execute("SELECT telegram_id FROM admins LIMIT 1").fetchone()[0]
-        await context.bot.send_photo(
-            admin,
-            update.message.photo[-1].file_id,
-            caption=f"💳 CHEK\nID: {update.effective_user.id}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Tasdiqlash",
-                 callback_data=f"confirm_{update.effective_user.id}")]
-            ])
-        )
-        context.user_data.clear()
-        await update.message.reply_text("⏳ Chek yuborildi")
+    if "pid" not in context.user_data:
+        return
+    pay_id = db.create_payment(context.user_data["pid"])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{pay_id}")]
+    ])
+    for a in config.ADMINS:
+        await update.message.forward(a)
+        await context.bot.send_message(a, "💰 Yangi chek", reply_markup=kb)
+    await update.message.reply_text("⏳ Admin tasdiqlashi kutilmoqda")
 
-# ================= MAIN =================
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ---------- AUTO ----------
+async def auto_check(app):
+    while True:
+        for pid, name, tg, room, end in db.get_all_people():
+            if days_left(end) == config.WARNING_DAYS:
+                msg = f"⚠️ {name} | Xona {room} | 2 kun qoldi"
+                await app.bot.send_message(tg, msg)
+                for a in config.ADMINS:
+                    await app.bot.send_message(a, msg)
+        await asyncio.sleep(3600)
+
+# ---------- MAIN ----------
+async def main():
+    app = ApplicationBuilder().token(config.TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(confirm, pattern="^confirm_"))
+    app.add_handler(CallbackQueryHandler(room_menu, pattern="^room_"))
     app.add_handler(CallbackQueryHandler(callbacks))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    app.run_polling()
+    asyncio.create_task(auto_check(app))
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
 
