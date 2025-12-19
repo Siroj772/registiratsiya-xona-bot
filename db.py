@@ -1,0 +1,100 @@
+import sqlite3
+
+conn = sqlite3.connect("hostel.db", check_same_thread=False)
+cur = conn.cursor()
+
+# ROOMS
+cur.execute("""
+CREATE TABLE IF NOT EXISTS rooms (
+    id INTEGER PRIMARY KEY,
+    daily_price INTEGER DEFAULT 0,
+    card TEXT
+)
+""")
+
+# PEOPLE
+cur.execute("""
+CREATE TABLE IF NOT EXISTS people (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id INTEGER,
+    name TEXT,
+    passport TEXT,
+    phone TEXT,
+    username TEXT,
+    tg_id INTEGER,
+    end_date TEXT,
+    balance INTEGER DEFAULT 0
+)
+""")
+
+# PAYMENTS
+cur.execute("""
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER,
+    amount INTEGER,
+    confirmed INTEGER DEFAULT 0
+)
+""")
+
+conn.commit()
+
+# ---------- ROOM ----------
+def set_room_price(room, price):
+    cur.execute("INSERT OR IGNORE INTO rooms (id) VALUES (?)", (room,))
+    cur.execute("UPDATE rooms SET daily_price=? WHERE id=?", (price, room))
+    conn.commit()
+
+def set_room_card(room, card):
+    cur.execute("INSERT OR IGNORE INTO rooms (id) VALUES (?)", (room,))
+    cur.execute("UPDATE rooms SET card=? WHERE id=?", (card, room))
+    conn.commit()
+
+def get_room_card(room):
+    cur.execute("SELECT card FROM rooms WHERE id=?", (room,))
+    r = cur.fetchone()
+    return r[0] if r else "Karta yo‘q"
+
+# ---------- PEOPLE ----------
+def people_count(room):
+    cur.execute("SELECT COUNT(*) FROM people WHERE room_id=?", (room,))
+    return cur.fetchone()[0]
+
+def add_person(data):
+    cur.execute("""
+    INSERT INTO people
+    (room_id,name,passport,phone,username,tg_id,end_date,balance)
+    VALUES (?,?,?,?,?,?,?,?)
+    """, data)
+    conn.commit()
+
+def get_person_by_tg(tg_id):
+    cur.execute("""
+    SELECT id,room_id,name,end_date,balance FROM people WHERE tg_id=?
+    """, (tg_id,))
+    return cur.fetchone()
+
+def get_all_people():
+    cur.execute("""
+    SELECT id,name,tg_id,room_id,end_date FROM people
+    """)
+    return cur.fetchall()
+
+def add_balance(pid, amount):
+    cur.execute("UPDATE people SET balance = balance + ? WHERE id=?", (amount, pid))
+    conn.commit()
+
+# ---------- PAY ----------
+def create_payment(pid):
+    cur.execute("INSERT INTO payments (person_id) VALUES (?)", (pid,))
+    conn.commit()
+    return cur.lastrowid
+
+def confirm_payment(pay_id, amount):
+    cur.execute("UPDATE payments SET confirmed=1, amount=? WHERE id=?", (amount, pay_id))
+    cur.execute("""
+    UPDATE people
+    SET balance = balance + ?
+    WHERE id = (SELECT person_id FROM payments WHERE id=?)
+    """, (amount, pay_id))
+    conn.commit()
